@@ -6,29 +6,157 @@ CSE 881: Automated Classification of Human vs AI Postings
 import streamlit as st
 import pandas as pd
 import numpy as np
-import plotly.graph_objects as go
+import json
+import os
 import plotly.express as px
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 ALL_MODELS = [
     "CatBoost",
     "Random Forest",
     "Logistic Regression",
     "SVM",
-    "Neural Network",
-    "Custom Algorithm",
+    "LSTM",
+    "BERT",
 ]
 
-# TODO: replace with actual results after training
-RESULTS_DF = pd.DataFrame(
+RESULTS_JOBS = pd.DataFrame(
     {
-        "Model": ALL_MODELS,
-        "Accuracy": [0.972, 0.958, 0.923, 0.941, 0.965, 0.887],
-        "Precision": [0.968, 0.952, 0.918, 0.937, 0.961, 0.879],
-        "Recall": [0.975, 0.963, 0.929, 0.944, 0.968, 0.894],
-        "F1": [0.971, 0.957, 0.923, 0.940, 0.964, 0.886],
-        "AUC": [0.994, 0.987, 0.971, 0.978, 0.991, 0.932],
+        "Model": ["CatBoost", "SVM", "Logistic Regression", "Random Forest", "BERT"],
+        "Accuracy": [1.0000, 1.0000, 0.9987, 1.0000, 0.9947],
+        "Precision": [1.00, 1.00, 1.00, 1.00, 0.99],
+        "Recall": [1.00, 1.00, 1.00, 1.00, 0.99],
+        "F1": [1.00, 1.00, 1.00, 1.00, 0.99],
     }
 )
+
+RESULTS_AG = pd.DataFrame(
+    {
+        "Model": ["SVM", "LSTM", "BERT"],
+        "Accuracy": [0.9937, 0.8861, 1.0000],
+        "Precision": [0.99, 0.90, 1.00],
+        "Recall": [0.99, 0.89, 1.00],
+        "F1": [0.99, 0.89, 1.00],
+    }
+)
+
+# Combined view (average across datasets where a model was evaluated on both)
+RESULTS_DF = pd.DataFrame(
+    {
+        "Model": ["CatBoost", "Random Forest", "Logistic Regression", "SVM", "LSTM", "BERT"],
+        "Accuracy": [1.0000, 1.0000, 0.9987, 0.9969, 0.8861, 0.9974],
+        "Precision": [1.00, 1.00, 1.00, 1.00, 0.90, 1.00],
+        "Recall": [1.00, 1.00, 1.00, 1.00, 0.89, 1.00],
+        "F1": [1.00, 1.00, 1.00, 1.00, 0.89, 0.99],
+    }
+)
+
+
+@st.cache_data
+def load_jobs_data():
+    path = os.path.join(BASE_DIR, "scraping", "jobs", "combined.csv")
+    return pd.read_csv(path)
+
+
+@st.cache_data
+def load_ag_data():
+    human_path = os.path.join(BASE_DIR, "scraping", "agricultural", "human_listings.json")
+    ai_path = os.path.join(BASE_DIR, "scraping", "agricultural", "ai_listings.json")
+    with open(human_path) as f:
+        human = pd.DataFrame(json.load(f))
+    human["label"] = "Human"
+    human["source_model"] = "human"
+    with open(ai_path) as f:
+        ai = pd.DataFrame(json.load(f))
+    ai["label"] = "AI"
+    return pd.concat([human, ai], ignore_index=True)
+
+
+import re
+import joblib
+from catboost import CatBoostClassifier
+
+MODELS_DIR = os.path.join(BASE_DIR, "models")
+
+# Text cleaning function (must match the notebook preprocessing)
+def deep_clean_text(text):
+    text = text.lower()
+    text = re.sub(r"[^a-z\s]", "", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    try:
+        from nltk.stem import WordNetLemmatizer
+        from nltk.corpus import stopwords
+        lemmatizer = WordNetLemmatizer()
+        stop_words = set(stopwords.words("english"))
+        words = text.split()
+        words = [lemmatizer.lemmatize(word) for word in words if word not in stop_words]
+        return " ".join(words)
+    except Exception:
+        return text
+
+
+@st.cache_resource
+def load_model(domain, model_name):
+    """Load a trained model and its vectorizer from disk."""
+    suffix = "jobs" if domain == "Job Postings" else "ag"
+    model_map = {
+        "SVM": f"svm_{suffix}.pkl",
+        "Logistic Regression": f"lr_{suffix}.pkl",
+        "Random Forest": f"rf_{suffix}.pkl",
+    }
+
+    if model_name == "CatBoost":
+        model_path = os.path.join(MODELS_DIR, f"catboost_{suffix}.cbm")
+        if not os.path.exists(model_path):
+            return None, None, "catboost"
+        model = CatBoostClassifier()
+        model.load_model(model_path)
+        return model, None, "catboost"
+
+    if model_name in model_map:
+        model_path = os.path.join(MODELS_DIR, model_map[model_name])
+        tfidf_path = os.path.join(MODELS_DIR, f"tfidf_{suffix}.pkl")
+        if not os.path.exists(model_path) or not os.path.exists(tfidf_path):
+            return None, None, None
+        model = joblib.load(model_path)
+        tfidf = joblib.load(tfidf_path)
+        return model, tfidf, "tfidf"
+
+    return None, None, None
+
+
+def predict_text(text, domain, model_name):
+    """Run inference on user text and return (is_ai, confidence)."""
+    model, tfidf, model_type = load_model(domain, model_name)
+    if model is None:
+        return None, None
+
+    cleaned = deep_clean_text(text)
+
+    if model_type == "catboost":
+        input_df = pd.DataFrame({"full_text": [cleaned]})
+        pred = model.predict(input_df)
+        proba = model.predict_proba(input_df)
+        is_ai = int(pred[0][0]) == 1 if isinstance(pred[0], (list, np.ndarray)) else int(pred[0]) == 1
+        confidence = float(max(proba[0]))
+        return is_ai, confidence
+
+    if model_type == "tfidf":
+        features = tfidf.transform([cleaned])
+        pred = model.predict(features)
+        is_ai = int(pred[0]) == 1
+        if hasattr(model, "predict_proba"):
+            proba = model.predict_proba(features)
+            confidence = float(max(proba[0]))
+        elif hasattr(model, "decision_function"):
+            decision = model.decision_function(features)
+            confidence = min(abs(float(decision[0])) / 2.0, 1.0)
+        else:
+            confidence = 1.0
+        return is_ai, confidence
+
+    return None, None
 
 EXAMPLE_TEXTS = {
     "Job Postings": {
@@ -146,8 +274,11 @@ def page_detector():
     with st.sidebar:
         st.subheader("Settings")
         domain = st.selectbox("Domain", ["Job Postings", "Agricultural Listings"])
-        model_choice = st.selectbox("Model", ALL_MODELS)
-        show_signals = st.toggle("Show detection signals", value=True)
+        available_models = {
+            "Job Postings": ["CatBoost", "SVM", "Logistic Regression", "Random Forest"],
+            "Agricultural Listings": ["SVM"],
+        }
+        model_choice = st.selectbox("Model", available_models.get(domain, ALL_MODELS))
 
         st.divider()
 
@@ -170,6 +301,9 @@ def page_detector():
 
     st.header("Live Detector")
     st.caption("Paste text below and classify it as human-written or AI-generated.")
+
+    user_text = ""
+    job_summary = ""
 
     if domain == "Job Postings":
         tab_text, tab_fields = st.tabs(["Paste text", "Structured fields"])
@@ -209,56 +343,53 @@ def page_detector():
     classify_clicked = st.button("Classify", use_container_width=True)
 
     if classify_clicked:
-        # TODO: replace with actual model inference
-        is_ai = True
-        confidence = 0.93
-        # TODO: replace with actual feature scores
-        signals = [
-            ("Vocabulary diversity", 85),
-            ("Sentence regularity", 72),
-            ("N-gram pattern score", 91),
-            ("Repetition index", 68),
-        ]
+        # Determine the text to classify
+        input_text = user_text if user_text else ""
+        if domain == "Job Postings" and not input_text and job_summary:
+            input_text = job_summary
 
-        with st.status("Classifying text...", expanded=True) as status:
-            st.write("Preprocessing text...")
-            st.write(f"Running **{model_choice}** model...")
-            st.write("Computing detection signals...")
-            status.update(label="Classification complete", state="complete")
-
-        label = "AI-Generated" if is_ai else "Human-Written"
-        st.toast(f"Result: {label} ({confidence:.0%})", icon=":material/check_circle:")
-
-        if is_ai:
-            st.error(f"**{label}** — {confidence:.0%} confidence ({model_choice})")
+        if not input_text or not input_text.strip():
+            st.warning("Please enter some text to classify.")
         else:
-            st.success(f"**{label}** — {confidence:.0%} confidence ({model_choice})")
+            with st.status("Classifying text...", expanded=True) as status:
+                st.write("Preprocessing text...")
+                st.write(f"Running **{model_choice}** model...")
+                is_ai, confidence = predict_text(input_text, domain, model_choice)
+                status.update(label="Classification complete", state="complete")
 
-        st.badge(
-            label,
-            icon=":material/smart_toy:" if is_ai else ":material/person:",
-            color="red" if is_ai else "green",
-        )
+            if is_ai is None:
+                st.error(
+                    f"Model files not found. Run the notebook and execute the "
+                    f"model-saving cell to generate files in `models/`."
+                )
+            else:
+                label = "AI-Generated" if is_ai else "Human-Written"
+                st.toast(f"Result: {label} ({confidence:.0%})", icon=":material/check_circle:")
 
-        st.session_state["history"].append(
-            {
-                "is_ai": is_ai,
-                "label": label,
-                "confidence": confidence,
-                "model": model_choice,
-            }
-        )
-        st.session_state["detector_text"] = ""
+                if is_ai:
+                    st.error(f"**{label}** — {confidence:.0%} confidence ({model_choice})")
+                else:
+                    st.success(f"**{label}** — {confidence:.0%} confidence ({model_choice})")
 
-        if show_signals:
-            st.divider()
-            st.subheader("Detection Signals")
-            for lbl, val in signals:
-                st.progress(val, text=f"{lbl} — {val}%")
+                st.badge(
+                    label,
+                    icon=":material/smart_toy:" if is_ai else ":material/person:",
+                    color="red" if is_ai else "green",
+                )
 
-        st.divider()
-        st.caption("Was this classification accurate?")
-        st.feedback("thumbs", key="detector_feedback")
+                st.session_state["history"].append(
+                    {
+                        "is_ai": is_ai,
+                        "label": label,
+                        "confidence": confidence,
+                        "model": model_choice,
+                    }
+                )
+                st.session_state["detector_text"] = ""
+
+                st.divider()
+                st.caption("Was this classification accurate?")
+                st.feedback("thumbs", key="detector_feedback")
 
 
 def page_performance():
@@ -274,7 +405,14 @@ def page_performance():
             if st.checkbox(m, value=True, key=f"perf_{m}"):
                 selected_models.append(m)
 
-    filtered_df = RESULTS_DF[RESULTS_DF["Model"].isin(selected_models)]
+    if perf_dataset == "Job Postings":
+        base_df = RESULTS_JOBS
+    elif perf_dataset == "Agricultural Listings":
+        base_df = RESULTS_AG
+    else:
+        base_df = RESULTS_DF
+
+    filtered_df = base_df[base_df["Model"].isin(selected_models)]
 
     st.header("Model Performance")
     st.caption(f"Evaluation on **{perf_dataset}** dataset.")
@@ -286,16 +424,15 @@ def page_performance():
     best_idx = filtered_df["Accuracy"].idxmax()
     best = filtered_df.loc[best_idx]
 
-    b1, b2, b3, b4 = st.columns(4)
+    b1, b2, b3 = st.columns(3)
     b1.metric("Best Model", best["Model"])
     b2.metric("Accuracy", f"{best['Accuracy']:.1%}")
     b3.metric("F1 Score", f"{best['F1']:.3f}")
-    b4.metric("AUC-ROC", f"{best['AUC']:.3f}")
 
     st.divider()
 
     st.subheader("All Models")
-    metric_cols = ["Accuracy", "Precision", "Recall", "F1", "AUC"]
+    metric_cols = ["Accuracy", "Precision", "Recall", "F1"]
     st.dataframe(
         filtered_df.style.format({c: "{:.1%}" for c in metric_cols}).highlight_max(
             subset=metric_cols, color="#ff4b4b40"
@@ -307,7 +444,7 @@ def page_performance():
     st.divider()
 
     st.subheader("Visual Comparison")
-    tab_bar, tab_cm, tab_roc = st.tabs(["Metrics", "Confusion Matrices", "ROC Curves"])
+    tab_bar, tab_cm = st.tabs(["Metrics", "Confusion Matrices"])
 
     with tab_bar:
         chart_df = filtered_df.set_index("Model")[
@@ -318,15 +455,25 @@ def page_performance():
         )
 
     with tab_cm:
-        # TODO: replace placeholder matrices with actual values after training
-        all_cms = {
-            "CatBoost": np.array([[195, 5], [8, 192]]),
-            "Random Forest": np.array([[190, 10], [7, 193]]),
-            "Logistic Regression": np.array([[183, 17], [14, 186]]),
-            "SVM": np.array([[187, 13], [11, 189]]),
-            "Neural Network": np.array([[193, 7], [6, 194]]),
-            "Custom Algorithm": np.array([[175, 25], [20, 180]]),
+        # Confusion matrices from trained models
+        cms_jobs = {
+            "CatBoost": np.array([[378, 0], [0, 380]]),
+            "Random Forest": np.array([[378, 0], [0, 380]]),
+            "Logistic Regression": np.array([[377, 1], [0, 380]]),
+            "SVM": np.array([[378, 0], [0, 380]]),
+            "BERT": np.array([[374, 4], [0, 380]]),
         }
+        cms_ag = {
+            "SVM": np.array([[77, 1], [0, 80]]),
+            "LSTM": np.array([[38, 1], [8, 32]]),
+            "BERT": np.array([[39, 0], [0, 40]]),
+        }
+        if perf_dataset == "Job Postings":
+            all_cms = cms_jobs
+        elif perf_dataset == "Agricultural Listings":
+            all_cms = cms_ag
+        else:
+            all_cms = {**cms_jobs, **cms_ag}
         labels = ["Human", "AI"]
         cms_to_show = {k: v for k, v in all_cms.items() if k in selected_models}
 
@@ -354,79 +501,6 @@ def page_performance():
                 )
                 st.plotly_chart(fig, use_container_width=True)
 
-    with tab_roc:
-        # TODO: replace with actual FPR/TPR from trained models
-        np.random.seed(42)
-        fig = go.Figure()
-        all_roc = {
-            "CatBoost": 0.994,
-            "Neural Network": 0.991,
-            "Random Forest": 0.987,
-            "SVM": 0.978,
-            "Logistic Regression": 0.971,
-            "Custom Algorithm": 0.932,
-        }
-        colors_map = dict(
-            zip(
-                all_roc.keys(),
-                ["#ff4b4b", "#ff6b6b", "#ff8a8a", "#ffaaaa", "#ffcccc", "#996060"],
-            )
-        )
-        for name, auc in all_roc.items():
-            if name not in selected_models:
-                continue
-            n = 200
-            fpr = np.sort(np.concatenate([[0], np.random.beta(0.5, 3, n), [1]]))
-            power = np.log(1 - auc + 1e-9) / np.log(0.5)
-            tpr = 1 - (1 - fpr) ** (1 / max(power, 0.1))
-            tpr = np.clip(np.sort(tpr), 0, 1)
-            tpr[0], tpr[-1] = 0.0, 1.0
-            fig.add_trace(
-                go.Scatter(
-                    x=fpr,
-                    y=tpr,
-                    mode="lines",
-                    name=f"{name} (AUC={auc:.3f})",
-                    line=dict(color=colors_map[name], width=2),
-                )
-            )
-        fig.add_trace(
-            go.Scatter(
-                x=[0, 1],
-                y=[0, 1],
-                mode="lines",
-                name="Random",
-                line=dict(color="#555", width=1, dash="dash"),
-                showlegend=False,
-            )
-        )
-        fig.update_layout(
-            xaxis_title="False Positive Rate",
-            yaxis_title="True Positive Rate",
-            legend=dict(x=0.55, y=0.05, bgcolor="rgba(0,0,0,0)"),
-            margin=dict(l=40, r=20, t=20, b=40),
-            height=420,
-            paper_bgcolor="rgba(0,0,0,0)",
-            plot_bgcolor="rgba(0,0,0,0)",
-            font=dict(color="#fafafa"),
-            xaxis=dict(gridcolor="#333", zeroline=False),
-            yaxis=dict(gridcolor="#333", zeroline=False),
-        )
-        st.plotly_chart(fig, use_container_width=True)
-
-    st.divider()
-
-    st.subheader("Cross-Dataset Generalization")
-    cross_df = pd.DataFrame(
-        {
-            "Train": ["Jobs", "Jobs", "Agriculture", "Agriculture"],
-            "Test": ["Jobs", "Agriculture", "Agriculture", "Jobs"],
-            "CatBoost": ["97.2%", "81.4%", "95.6%", "78.3%"],
-            "Random Forest": ["95.8%", "79.1%", "93.2%", "76.8%"],
-            "Neural Net": ["96.5%", "83.7%", "94.8%", "80.1%"],
-        }
-    )
-    st.dataframe(cross_df, use_container_width=True, hide_index=True)
 
 
 def page_data():
@@ -463,12 +537,17 @@ def page_data():
             )
             model_f = st.multiselect(
                 "AI Model",
-                ["gpt-oss-120b", "glm-5", "gemma-3-1b-it", "qwen2.5-7b-instruct"],
+                [
+                    "openai/gpt-oss-120b",
+                    "qwen/qwen2.5-7b-instruct",
+                    "meta/llama-3.1-70b-instruct",
+                    "mistralai/mixtral-8x22b-instruct-v0.1",
+                ],
                 default=[
-                    "gpt-oss-120b",
-                    "glm-5",
-                    "gemma-3-1b-it",
-                    "qwen2.5-7b-instruct",
+                    "openai/gpt-oss-120b",
+                    "qwen/qwen2.5-7b-instruct",
+                    "meta/llama-3.1-70b-instruct",
+                    "mistralai/mixtral-8x22b-instruct-v0.1",
                 ],
             )
             max_rows = st.slider("Max rows", 10, 500, 100, key="ag_rows")
@@ -526,8 +605,13 @@ def page_data():
         st.caption(
             f"Showing: labels={label_f}, sources={source_f}, limit={max_rows}"
         )
-        # TODO: load from combined.csv with sidebar filters applied
-        st.info("Connect `combined.csv` to display filtered data here.")
+        jobs_df = load_jobs_data()
+        label_map = {"Human": 0, "AI": 1}
+        label_vals = [label_map[lbl] for lbl in label_f]
+        filtered_jobs = jobs_df[
+            (jobs_df["is_AI"].isin(label_vals)) & (jobs_df["source"].isin(source_f))
+        ].head(max_rows)
+        st.dataframe(filtered_jobs, use_container_width=True, hide_index=True)
 
         with st.expander("Schema"):
             st.markdown("""
@@ -554,10 +638,10 @@ def page_data():
             ai_df = pd.DataFrame(
                 {
                     "Model": [
-                        "gpt-oss-120b",
-                        "glm-5",
-                        "gemma-3-1b-it",
-                        "qwen2.5-7b-instruct",
+                        "openai/gpt-oss-120b",
+                        "qwen/qwen2.5-7b-instruct",
+                        "meta/llama-3.1-70b-instruct",
+                        "mistralai/mixtral-8x22b-instruct-v0.1",
                     ],
                     "Entries": [100, 100, 100, 100],
                 }
@@ -568,7 +652,7 @@ def page_data():
             st.subheader("Distribution")
             ag_chart = pd.DataFrame(
                 {
-                    "Source": ["Human", "gpt-oss", "glm-5", "gemma-3", "qwen2.5"],
+                    "Source": ["Human", "gpt-oss-120b", "qwen2.5-7b", "llama-3.1-70b", "mixtral-8x22b"],
                     "Entries": [390, 100, 100, 100, 100],
                 }
             ).set_index("Source")
@@ -578,8 +662,13 @@ def page_data():
 
         st.subheader("Sample Data")
         st.caption(f"Showing: labels={label_f}, models={model_f}, limit={max_rows}")
-        # TODO: load from scraping/*.json with sidebar filters applied
-        st.info("Connect JSON files to display data here.")
+        ag_df = load_ag_data()
+        filtered_ag = ag_df[ag_df["label"].isin(label_f)]
+        if "AI" in label_f and model_f:
+            filtered_ag = filtered_ag[
+                (filtered_ag["label"] == "Human") | (filtered_ag["source_model"].isin(model_f))
+            ]
+        st.dataframe(filtered_ag.head(max_rows), use_container_width=True, hide_index=True)
 
         with st.expander("Schema"):
             st.markdown("""
@@ -655,8 +744,8 @@ using Playwright + BeautifulSoup. 400 AI listings generated via 4 NVIDIA NIM mod
                     "Random Forest",
                     "SVM",
                     "CatBoost",
-                    "Neural Network",
-                    "Custom Algorithm",
+                    "LSTM",
+                    "BERT",
                 ],
                 "Category": [
                     "Baseline",
@@ -664,15 +753,15 @@ using Playwright + BeautifulSoup. 400 AI listings generated via 4 NVIDIA NIM mod
                     "Baseline",
                     "Gradient Boosting",
                     "Deep Learning",
-                    "Hand-crafted",
+                    "Deep Learning",
                 ],
                 "Description": [
                     "Linear classifier on TF-IDF features",
-                    "Ensemble of decision trees",
-                    "SVM with RBF kernel",
-                    "Handles categorical features natively",
-                    "Multi-layer network on text embeddings",
-                    "Rule-based AI writing pattern detection",
+                    "Ensemble of decision trees on TF-IDF features",
+                    "SVM with linear kernel on TF-IDF features",
+                    "Handles categorical text features natively",
+                    "LSTM network on tokenized text sequences",
+                    "Fine-tuned BERT (bert_tiny_en_uncased)",
                 ],
             }
         )
