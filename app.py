@@ -46,16 +46,16 @@ RESULTS_DF = pd.DataFrame(
 
 # Brand-inspired colors for each text source
 SOURCE_COLORS = {
-    "human": "#64748B",                                   # slate (neutral)
-    "claude": "#D97757",                                  # Anthropic coral
-    "gemini": "#4285F4",                                  # Google blue
-    "chatgpt": "#10A37F",                                 # OpenAI teal
-    "copilot": "#8b5cf6",                                 # Microsoft Copilot violet
-    "perplexity": "#20B8CD",                              # Perplexity teal
-    "openai/gpt-oss-120b": "#10A37F",                     # OpenAI teal
-    "qwen/qwen2.5-7b-instruct": "#F97316",                # Alibaba orange
-    "mistralai/mixtral-8x22b-instruct-v0.1": "#FA520F",   # Mistral orange
-    "meta/llama-3.1-70b-instruct": "#1877F2",             # Meta blue
+    "human": "#64748B",  # slate (neutral)
+    "claude": "#D97757",  # Anthropic coral
+    "gemini": "#4285F4",  # Google blue
+    "chatgpt": "#10A37F",  # OpenAI teal
+    "copilot": "#8b5cf6",  # Microsoft Copilot violet
+    "perplexity": "#20B8CD",  # Perplexity teal
+    "openai/gpt-oss-120b": "#10A37F",  # OpenAI teal
+    "qwen/qwen2.5-7b-instruct": "#F97316",  # Alibaba orange
+    "mistralai/mixtral-8x22b-instruct-v0.1": "#FA520F",  # Mistral orange
+    "meta/llama-3.1-70b-instruct": "#1877F2",  # Meta blue
 }
 
 
@@ -142,11 +142,11 @@ def load_model(model_name):
             return None, None, None
         try:
             import keras
-            import keras_nlp
+            import keras_nlp  # noqa: F401 (registers custom layers)
 
             model = keras.models.load_model(path)
-        except Exception:
-            return None, None, "bert_error"
+        except Exception as e:
+            return None, None, f"bert_error:{type(e).__name__}: {e}"
         return model, None, "bert"
 
     if model_name in sklearn_models:
@@ -164,8 +164,8 @@ def load_model(model_name):
 def predict_text(text, model_name):
     """Run inference on user text and return (is_ai, confidence)."""
     model, tfidf, model_type = load_model(model_name)
-    if model_type == "bert_error":
-        return None, "bert_error"
+    if isinstance(model_type, str) and model_type.startswith("bert_error"):
+        return None, model_type
     if model is None:
         return None, None
 
@@ -266,15 +266,21 @@ def page_home():
     st.caption("Four-stage pipeline from raw data to live predictions.")
 
     steps = [
-        ("Collect", "Scrape real postings from Indeed, Care Farming Network, and Reddit."),
-        ("Generate", "Synthesize AI text via Claude, ChatGPT, Gemini, Copilot, and more."),
+        (
+            "Collect",
+            "Scrape real postings from Indeed, Care Farming Network, and Reddit.",
+        ),
+        (
+            "Generate",
+            "Synthesize AI text via Claude, ChatGPT, Gemini, Copilot, and more.",
+        ),
         ("Preprocess", "Clean, normalize, and extract TF-IDF features with NLTK."),
         ("Classify", "Train 6 models and run real-time predictions in this app."),
     ]
     cols = st.columns(4, gap="large")
     for i, (col, (title, desc)) in enumerate(zip(cols, steps)):
         with col:
-            st.caption(f"STEP {i+1:02d}")
+            st.caption(f"STEP {i + 1:02d}")
             st.markdown(f"##### {title}")
             st.caption(desc)
 
@@ -284,9 +290,21 @@ def page_home():
     st.caption("Three distinct domains, combined into a single training set.")
 
     datasets = [
-        ("Job Postings", "3,000", "Indeed (human) + Claude, ChatGPT, Copilot, Gemini, Perplexity (AI)"),
-        ("Agricultural Listings", "790", "Care Farming Network (human) + 4 NVIDIA NIM models (AI)"),
-        ("Social Media Posts", "1,206", "Reddit (human) + ChatGPT, Claude, Gemini (AI)"),
+        (
+            "Job Postings",
+            "3,000",
+            "Indeed (human) + Claude, ChatGPT, Copilot, Gemini, Perplexity (AI)",
+        ),
+        (
+            "Agricultural Listings",
+            "790",
+            "Care Farming Network (human) + 4 NVIDIA NIM models (AI)",
+        ),
+        (
+            "Social Media Posts",
+            "1,206",
+            "Reddit (human) + ChatGPT, Claude, Gemini (AI)",
+        ),
     ]
     cols = st.columns(3, gap="large")
     for col, (title, count, sources) in zip(cols, datasets):
@@ -363,11 +381,9 @@ def page_detector():
             with st.spinner(f"Running {model_choice}..."):
                 is_ai, confidence = predict_text(input_text, model_choice)
 
-            if confidence == "bert_error":
-                st.error(
-                    "TinyBERT requires `tensorflow-text` which is not installed. "
-                    "Use a different model, or run `pip install tensorflow-text`."
-                )
+            if isinstance(confidence, str) and confidence.startswith("bert_error"):
+                detail = confidence.split(":", 1)[1] if ":" in confidence else ""
+                st.error(f"TinyBERT failed to load.\n\n**Error:** {detail}")
             elif is_ai is None:
                 st.error(
                     "Model files not found. Run the notebook and execute the "
@@ -631,9 +647,7 @@ def page_data():
     total = len(df)
     n_human = (df["_label"] == "Human").sum()
     n_ai = (df["_label"] == "AI").sum()
-    avg_words = (
-        df[cfg["text_col"]].fillna("").astype(str).str.split().str.len().mean()
-    )
+    avg_words = df[cfg["text_col"]].fillna("").astype(str).str.split().str.len().mean()
 
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Total Samples", f"{total:,}")
@@ -673,9 +687,7 @@ def page_data():
 
     with col_balance:
         st.subheader("Class Balance")
-        balance_df = pd.DataFrame(
-            {"Label": ["Human", "AI"], "Count": [n_human, n_ai]}
-        )
+        balance_df = pd.DataFrame({"Label": ["Human", "AI"], "Count": [n_human, n_ai]})
         fig_bal = px.pie(
             balance_df,
             values="Count",
@@ -702,9 +714,7 @@ def page_data():
 
     # Text length distribution (Human vs AI)
     st.subheader("Text Length Distribution (Human vs AI)")
-    word_counts = (
-        df[cfg["text_col"]].fillna("").astype(str).str.split().str.len()
-    )
+    word_counts = df[cfg["text_col"]].fillna("").astype(str).str.split().str.len()
     length_df = pd.DataFrame({"Words": word_counts, "Label": df["_label"]})
     fig_len = px.histogram(
         length_df,
@@ -740,7 +750,6 @@ def page_data():
             cfg["schema"], columns=["Field", "Type", "Description"]
         )
         st.dataframe(schema_df, use_container_width=True, hide_index=True)
-
 
 
 # Configure Streamlit App
