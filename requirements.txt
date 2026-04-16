@@ -3,10 +3,13 @@ pandas
 numpy
 plotly
 catboost
-scikit-learn
+scikit-learn==1.6.1
 joblib
 nltk
 xgboost
-tensorflow
-tensorflow-text
-keras-nlp
+tensorflow==2.20.0
+tensorflow-text==2.20.1
+keras-nlp==0.27.1
+tokenizers
+sentencepiece
+
