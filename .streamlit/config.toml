@@ -1,6 +1,23 @@
 [theme]
-primaryColor = "#ff4b4b"
-backgroundColor = "#0e1117"
-secondaryBackgroundColor = "#262730"
-textColor = "#fafafa"
-font = "sans serif"
+base = "dark"
+
+# Refined color palette (inspired by Linear / Vercel)
+primaryColor = "#ef4444"
+backgroundColor = "#0a0a0a"
+secondaryBackgroundColor = "#171717"
+textColor = "#ededed"
+
+# Inter from Google Fonts — de facto modern sans-serif
+font = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+headingFont = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@500;600;700&display=swap"
+codeFont = "JetBrains Mono:https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap"
+
+# Modern spacing & radii
+baseRadius = "0.5rem"
+baseFontSize = 15
+
+# Softer borders
+borderColor = "#262626"
+dataframeBorderColor = "#262626"
+dataframeHeaderBackgroundColor = "#171717"
+showWidgetBorder = true

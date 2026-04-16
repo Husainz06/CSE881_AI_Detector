@@ -8,60 +8,68 @@ import pandas as pd
 import numpy as np
 import json
 import os
+import re
+import joblib
 import plotly.express as px
+from catboost import CatBoostClassifier
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+MODELS_DIR = os.path.join(BASE_DIR, "models")
 
 ALL_MODELS = [
     "CatBoost",
-    "Random Forest",
     "Logistic Regression",
+    "Random Forest",
     "SVM",
-    "LSTM",
-    "BERT",
+    "XGBoost",
+    "TinyBERT",
 ]
 
-RESULTS_JOBS = pd.DataFrame(
-    {
-        "Model": ["CatBoost", "SVM", "Logistic Regression", "Random Forest", "BERT"],
-        "Accuracy": [1.0000, 1.0000, 0.9987, 1.0000, 0.9947],
-        "Precision": [1.00, 1.00, 1.00, 1.00, 0.99],
-        "Recall": [1.00, 1.00, 1.00, 1.00, 0.99],
-        "F1": [1.00, 1.00, 1.00, 1.00, 0.99],
-    }
-)
-
-RESULTS_AG = pd.DataFrame(
-    {
-        "Model": ["SVM", "LSTM", "BERT"],
-        "Accuracy": [0.9937, 0.8861, 1.0000],
-        "Precision": [0.99, 0.90, 1.00],
-        "Recall": [0.99, 0.89, 1.00],
-        "F1": [0.99, 0.89, 1.00],
-    }
-)
-
-# Combined view (average across datasets where a model was evaluated on both)
+# Trained on the combined dataset (jobs + agricultural + social media)
 RESULTS_DF = pd.DataFrame(
     {
-        "Model": ["CatBoost", "Random Forest", "Logistic Regression", "SVM", "LSTM", "BERT"],
-        "Accuracy": [1.0000, 1.0000, 0.9987, 0.9969, 0.8861, 0.9974],
-        "Precision": [1.00, 1.00, 1.00, 1.00, 0.90, 1.00],
-        "Recall": [1.00, 1.00, 1.00, 1.00, 0.89, 1.00],
-        "F1": [1.00, 1.00, 1.00, 1.00, 0.89, 0.99],
+        "Model": [
+            "CatBoost",
+            "Logistic Regression",
+            "Random Forest",
+            "SVM",
+            "XGBoost",
+            "TinyBERT",
+        ],
+        "Accuracy": [0.9430, 0.9480, 0.9500, 0.9480, 0.9400, 0.9610],
+        "Precision": [0.95, 0.95, 0.95, 0.95, 0.94, 0.96],
+        "Recall": [0.94, 0.95, 0.95, 0.95, 0.94, 0.96],
+        "F1": [0.94, 0.95, 0.95, 0.95, 0.94, 0.96],
     }
 )
+
+
+# Brand-inspired colors for each text source
+SOURCE_COLORS = {
+    "human": "#64748B",                                   # slate (neutral)
+    "claude": "#D97757",                                  # Anthropic coral
+    "gemini": "#4285F4",                                  # Google blue
+    "chatgpt": "#10A37F",                                 # OpenAI teal
+    "copilot": "#8b5cf6",                                 # Microsoft Copilot violet
+    "perplexity": "#20B8CD",                              # Perplexity teal
+    "openai/gpt-oss-120b": "#10A37F",                     # OpenAI teal
+    "qwen/qwen2.5-7b-instruct": "#F97316",                # Alibaba orange
+    "mistralai/mixtral-8x22b-instruct-v0.1": "#FA520F",   # Mistral orange
+    "meta/llama-3.1-70b-instruct": "#1877F2",             # Meta blue
+}
 
 
 @st.cache_data
 def load_jobs_data():
-    path = os.path.join(BASE_DIR, "scraping", "jobs", "combined.csv")
+    path = os.path.join(BASE_DIR, "scraping", "jobs", "combined_jobs.csv")
     return pd.read_csv(path)
 
 
 @st.cache_data
 def load_ag_data():
-    human_path = os.path.join(BASE_DIR, "scraping", "agricultural", "human_listings.json")
+    human_path = os.path.join(
+        BASE_DIR, "scraping", "agricultural", "human_listings.json"
+    )
     ai_path = os.path.join(BASE_DIR, "scraping", "agricultural", "ai_listings.json")
     with open(human_path) as f:
         human = pd.DataFrame(json.load(f))
@@ -73,20 +81,21 @@ def load_ag_data():
     return pd.concat([human, ai], ignore_index=True)
 
 
-import re
-import joblib
-from catboost import CatBoostClassifier
+@st.cache_data
+def load_social_data():
+    path = os.path.join(BASE_DIR, "scraping", "social_media", "Combined_Dataset.csv")
+    return pd.read_csv(path)
 
-MODELS_DIR = os.path.join(BASE_DIR, "models")
 
 # Text cleaning function (must match the notebook preprocessing)
 def deep_clean_text(text):
     text = text.lower()
-    text = re.sub(r"[^a-z\s]", "", text)
+    text = re.sub(r"[^a-z\s]", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
     try:
         from nltk.stem import WordNetLemmatizer
         from nltk.corpus import stopwords
+
         lemmatizer = WordNetLemmatizer()
         stop_words = set(stopwords.words("english"))
         words = text.split()
@@ -97,26 +106,52 @@ def deep_clean_text(text):
 
 
 @st.cache_resource
-def load_model(domain, model_name):
-    """Load a trained model and its vectorizer from disk."""
-    suffix = "jobs" if domain == "Job Postings" else "ag"
-    model_map = {
-        "SVM": f"svm_{suffix}.pkl",
-        "Logistic Regression": f"lr_{suffix}.pkl",
-        "Random Forest": f"rf_{suffix}.pkl",
+def load_model(model_name):
+    """Load a trained model and its vectorizer from disk (combined dataset)."""
+    sklearn_models = {
+        "SVM": "svm_jobs.pkl",
+        "Logistic Regression": "lr_jobs.pkl",
+        "Random Forest": "rf_jobs.pkl",
     }
 
     if model_name == "CatBoost":
-        model_path = os.path.join(MODELS_DIR, f"catboost_{suffix}.cbm")
-        if not os.path.exists(model_path):
-            return None, None, "catboost"
+        path = os.path.join(MODELS_DIR, "catboost_jobs.cbm")
+        if not os.path.exists(path):
+            return None, None, None
         model = CatBoostClassifier()
-        model.load_model(model_path)
+        model.load_model(path)
         return model, None, "catboost"
 
-    if model_name in model_map:
-        model_path = os.path.join(MODELS_DIR, model_map[model_name])
-        tfidf_path = os.path.join(MODELS_DIR, f"tfidf_{suffix}.pkl")
+    if model_name == "XGBoost":
+        path = os.path.join(MODELS_DIR, "xgboost_jobs.json")
+        tfidf_path = os.path.join(MODELS_DIR, "tfidf_jobs.pkl")
+        if not os.path.exists(path) or not os.path.exists(tfidf_path):
+            return None, None, None
+        try:
+            from xgboost import XGBClassifier
+        except ImportError:
+            return None, None, None
+        model = XGBClassifier()
+        model.load_model(path)
+        tfidf = joblib.load(tfidf_path)
+        return model, tfidf, "tfidf"
+
+    if model_name == "TinyBERT":
+        path = os.path.join(MODELS_DIR, "tinybert_jobs.keras")
+        if not os.path.exists(path):
+            return None, None, None
+        try:
+            import keras
+            import keras_nlp
+
+            model = keras.models.load_model(path)
+        except Exception:
+            return None, None, "bert_error"
+        return model, None, "bert"
+
+    if model_name in sklearn_models:
+        model_path = os.path.join(MODELS_DIR, sklearn_models[model_name])
+        tfidf_path = os.path.join(MODELS_DIR, "tfidf_jobs.pkl")
         if not os.path.exists(model_path) or not os.path.exists(tfidf_path):
             return None, None, None
         model = joblib.load(model_path)
@@ -126,9 +161,11 @@ def load_model(domain, model_name):
     return None, None, None
 
 
-def predict_text(text, domain, model_name):
+def predict_text(text, model_name):
     """Run inference on user text and return (is_ai, confidence)."""
-    model, tfidf, model_type = load_model(domain, model_name)
+    model, tfidf, model_type = load_model(model_name)
+    if model_type == "bert_error":
+        return None, "bert_error"
     if model is None:
         return None, None
 
@@ -138,8 +175,22 @@ def predict_text(text, domain, model_name):
         input_df = pd.DataFrame({"full_text": [cleaned]})
         pred = model.predict(input_df)
         proba = model.predict_proba(input_df)
-        is_ai = int(pred[0][0]) == 1 if isinstance(pred[0], (list, np.ndarray)) else int(pred[0]) == 1
+        is_ai = (
+            int(pred[0][0]) == 1
+            if isinstance(pred[0], (list, np.ndarray))
+            else int(pred[0]) == 1
+        )
         confidence = float(max(proba[0]))
+        return is_ai, confidence
+
+    if model_type == "bert":
+        # TinyBERT model takes raw light-cleaned text
+        light_cleaned = re.sub(r"<.*?>", "", text)
+        light_cleaned = re.sub(r"\s+", " ", light_cleaned).strip()
+        logits = model.predict([light_cleaned], verbose=0)
+        probs = np.exp(logits[0]) / np.sum(np.exp(logits[0]))
+        is_ai = int(np.argmax(probs)) == 1
+        confidence = float(max(probs))
         return is_ai, confidence
 
     if model_type == "tfidf":
@@ -150,119 +201,109 @@ def predict_text(text, domain, model_name):
             proba = model.predict_proba(features)
             confidence = float(max(proba[0]))
         elif hasattr(model, "decision_function"):
-            decision = model.decision_function(features)
-            confidence = min(abs(float(decision[0])) / 2.0, 1.0)
+            decision = float(model.decision_function(features)[0])
+            confidence = 1.0 / (1.0 + np.exp(-abs(decision)))
         else:
             confidence = 1.0
         return is_ai, confidence
 
     return None, None
 
-EXAMPLE_TEXTS = {
-    "Job Postings": {
-        "Human": (
-            "Overview: About The Geneva Foundation\n"
-            "The Geneva Foundation is a 501(c)(3) nonprofit established in 1993 "
-            "with the mission to advance military medicine. We work alongside "
-            "clinicians and scientists at military medical centers and clinics "
-            "around the world. Our research covers a wide range of areas, from "
-            "traumatic brain injury and infectious diseases to psychological health."
-        ),
-        "AI": (
-            "We are a growing, innovation-focused company that leverages data science, "
-            "machine learning, and modern software engineering practices to build trusted "
-            "products and services used by millions of end users. Our organization is a "
-            "well-established technology and analytics company that supports a wide range "
-            "of commercial and public-sector clients. We emphasize rigorous data-driven "
-            "decision making and invest heavily in scalable analytics platforms."
-        ),
-    },
-    "Agricultural Listings": {
-        "Human": (
-            "We are a small family farm in rural Vermont, raising heritage breed "
-            "chickens and growing mixed vegetables on 12 acres. My husband and I "
-            "started this place in 2008 after he came back from his second tour. "
-            "The farm has been good therapy for both of us. We sell at the Saturday "
-            "market in Burlington and run a small CSA program."
-        ),
-        "AI": (
-            "Nestled in the heart of California's rural landscape, the Reentry Farmer "
-            "Project is a small, family-run homestead dedicated to therapeutic agriculture "
-            "and social farming. Our mission is to support formerly incarcerated individuals "
-            "as they reenter society through the healing power of working the land. We focus "
-            "on urban rooftop gardening and hydroponics, providing not just fresh produce but "
-            "also a sense of purpose and community."
-        ),
-    },
-}
-
 
 # Page Functions
 
 
+def _sidebar_brand():
+    """Consistent brand header across all sidebars."""
+    st.markdown("### AI Text Detector")
+    st.caption("CSE 881 · Spring 2025")
+    st.divider()
+
+
 def page_home():
     with st.sidebar:
-        st.subheader("Project Info")
-        st.caption("CSE 881 — Spring 2025")
-        st.markdown(
-            "Automated classification of human vs. AI-generated "
-            "text across two domains: job postings and agricultural listings."
-        )
-        st.divider()
-        st.markdown("**Datasets**")
-        st.markdown("- Job Postings: ~2,000")
-        st.markdown("- Agricultural: 790")
-        st.markdown("**AI Sources:** 9 models")
+        _sidebar_brand()
+        st.markdown("**Quick Facts**")
+        st.caption("4,996 labeled samples")
+        st.caption("3 distinct domains")
+        st.caption("6 trained models")
+        st.caption("Best: TinyBERT at 96.1%")
 
-    st.header("AI Text Detector")
-    st.caption(
-        "Classify human vs. AI-generated text across job postings and agricultural listings."
+    st.title("AI Text Detector")
+    st.markdown(
+        "A unified classifier trained on nearly 5,000 real and AI-generated samples "
+        "across job postings, agricultural listings, and social media."
     )
 
+    cta1, cta2, _ = st.columns([1, 1, 3])
+    with cta1:
+        if st.button(
+            "Try the Detector",
+            type="primary",
+            icon=":material/document_scanner:",
+            use_container_width=True,
+        ):
+            st.switch_page(PAGE_DETECTOR)
+    with cta2:
+        if st.button(
+            "View Performance",
+            icon=":material/leaderboard:",
+            use_container_width=True,
+        ):
+            st.switch_page(PAGE_PERFORMANCE)
+
+    st.divider()
+
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Text Samples", "2,800+")
-    m2.metric("Datasets", "2")
+    m1.metric("Text Samples", "4,996")
+    m2.metric("Datasets", "3")
     m3.metric("AI Sources", "9")
-    m4.metric("Models Trained", "6+")
+    m4.metric("Best Accuracy", "96.1%")
 
     st.divider()
 
-    st.subheader("Pipeline")
-    s1, s2, s3, s4 = st.columns(4)
-    with s1:
-        st.markdown("**1. Collect**")
-        st.caption("Scrape real postings from Indeed & Care Farming Network.")
-    with s2:
-        st.markdown("**2. Generate**")
-        st.caption("Produce AI text via Claude, ChatGPT, Gemini, Copilot & more.")
-    with s3:
-        st.markdown("**3. Preprocess**")
-        st.caption("Clean, normalize, extract features with NLTK & TF-IDF.")
-    with s4:
-        st.markdown("**4. Classify**")
-        st.caption("Train models and detect AI text in real time.")
+    st.subheader("How It Works")
+    st.caption("Four-stage pipeline from raw data to live predictions.")
+
+    steps = [
+        ("Collect", "Scrape real postings from Indeed, Care Farming Network, and Reddit."),
+        ("Generate", "Synthesize AI text via Claude, ChatGPT, Gemini, Copilot, and more."),
+        ("Preprocess", "Clean, normalize, and extract TF-IDF features with NLTK."),
+        ("Classify", "Train 6 models and run real-time predictions in this app."),
+    ]
+    cols = st.columns(4, gap="large")
+    for i, (col, (title, desc)) in enumerate(zip(cols, steps)):
+        with col:
+            st.caption(f"STEP {i+1:02d}")
+            st.markdown(f"##### {title}")
+            st.caption(desc)
 
     st.divider()
 
-    col_left, col_right = st.columns(2, gap="large")
+    st.subheader("Datasets")
+    st.caption("Three distinct domains, combined into a single training set.")
 
-    with col_left:
-        st.subheader("Job Postings Dataset")
-        st.markdown("""
-        ~2,000 data science job postings. Human entries scraped from Indeed;
-        AI entries generated by **5 LLMs** (Claude, ChatGPT, Copilot, Gemini, Perplexity).
+    datasets = [
+        ("Job Postings", "3,000", "Indeed (human) + Claude, ChatGPT, Copilot, Gemini, Perplexity (AI)"),
+        ("Agricultural Listings", "790", "Care Farming Network (human) + 4 NVIDIA NIM models (AI)"),
+        ("Social Media Posts", "1,206", "Reddit (human) + ChatGPT, Claude, Gemini (AI)"),
+    ]
+    cols = st.columns(3, gap="large")
+    for col, (title, count, sources) in zip(cols, datasets):
+        with col:
+            st.markdown(f"##### {title}")
+            st.metric("Samples", count)
+            st.caption(sources)
 
-        Fields: title, location, salary, description, label, source.
-        """)
 
-    with col_right:
-        st.subheader("Agricultural Listings Dataset")
-        st.markdown("""
-        790 farm & agricultural listings. Human entries scraped from the
-        Care Farming Network; AI entries generated by **4 NVIDIA NIM models**.
-
-        Fields: id, name, description, label, source model.
-        """)
+MODEL_DESCRIPTIONS = {
+    "CatBoost": "Gradient boosting on raw text. Fast inference, handles categorical features natively.",
+    "Logistic Regression": "Linear baseline on TF-IDF features. Lightweight and interpretable.",
+    "Random Forest": "Tree ensemble on TF-IDF. Robust to noise, captures non-linear patterns.",
+    "SVM": "Support vector machine with linear kernel on TF-IDF.",
+    "XGBoost": "Gradient boosting on TF-IDF. Strong general-purpose baseline.",
+    "TinyBERT": "Fine-tuned transformer (bert_tiny_en_uncased). Highest accuracy at 96.1%.",
+}
 
 
 def page_detector():
@@ -272,110 +313,80 @@ def page_detector():
         st.session_state["history"] = []
 
     with st.sidebar:
-        st.subheader("Settings")
-        domain = st.selectbox("Domain", ["Job Postings", "Agricultural Listings"])
-        available_models = {
-            "Job Postings": ["CatBoost", "SVM", "Logistic Regression", "Random Forest"],
-            "Agricultural Listings": ["SVM"],
-        }
-        model_choice = st.selectbox("Model", available_models.get(domain, ALL_MODELS))
+        _sidebar_brand()
+        model_choice = st.selectbox("Model", ALL_MODELS)
+        st.caption(MODEL_DESCRIPTIONS.get(model_choice, ""))
 
         st.divider()
-
-        st.subheader("Try an Example")
-        st.caption("Load sample text into the editor.")
-        examples = EXAMPLE_TEXTS[domain]
-        if st.button("Load Human example", use_container_width=True):
-            st.session_state["detector_text"] = examples["Human"]
-            st.rerun()
-        if st.button("Load AI example", use_container_width=True):
-            st.session_state["detector_text"] = examples["AI"]
-            st.rerun()
+        st.markdown("**Tips**")
+        st.caption("Longer text yields more reliable predictions.")
+        st.caption("Try different models to compare.")
 
         if st.session_state["history"]:
             st.divider()
-            st.subheader("History")
+            st.markdown("**Recent Predictions**")
             for entry in reversed(st.session_state["history"][-5:]):
                 verdict = "AI" if entry["is_ai"] else "Human"
-                st.caption(f"{verdict} ({entry['confidence']:.0%}) — {entry['model']}")
-
-    st.header("Live Detector")
-    st.caption("Paste text below and classify it as human-written or AI-generated.")
-
-    user_text = ""
-    job_summary = ""
-
-    if domain == "Job Postings":
-        tab_text, tab_fields = st.tabs(["Paste text", "Structured fields"])
-
-        with tab_text:
-            user_text = st.text_area(
-                "Full posting text",
-                height=220,
-                placeholder="Paste the job posting here...",
-                label_visibility="collapsed",
-                value=st.session_state["detector_text"],
-                key="text_input_paste",
-            )
-
-        with tab_fields:
-            f1, f2 = st.columns(2)
-            with f1:
-                job_title = st.text_input("Title", placeholder="Senior Data Scientist")
-                job_location = st.text_input("Location", placeholder="New York, NY")
-            with f2:
-                job_salary = st.text_input(
-                    "Salary", placeholder="$120,000 - $150,000/yr"
+                st.caption(
+                    f"**{verdict}** · {entry['confidence']:.0%} · {entry['model']}"
                 )
-            job_summary = st.text_area(
-                "Description", height=180, placeholder="Full job description..."
-            )
-    else:
-        user_text = st.text_area(
-            "Listing description",
-            height=220,
-            placeholder="Paste the agricultural listing here...",
-            label_visibility="collapsed",
-            value=st.session_state["detector_text"],
-            key="text_input_ag",
-        )
 
-    classify_clicked = st.button("Classify", use_container_width=True)
+    st.title("Live Detector")
+    st.caption("Paste any text and classify it as human-written or AI-generated.")
+
+    user_text = st.text_area(
+        "Text to classify",
+        height=260,
+        placeholder="Paste any text here (job posting, agricultural listing, social media post, or anything else)...",
+        label_visibility="collapsed",
+        value=st.session_state["detector_text"],
+        key="text_input_paste",
+    )
+
+    word_count = len(user_text.split()) if user_text else 0
+    char_count = len(user_text) if user_text else 0
+    st.caption(f"**{word_count:,}** words · **{char_count:,}** characters")
+
+    classify_clicked = st.button(
+        "Classify",
+        icon=":material/document_scanner:",
+        use_container_width=True,
+        type="primary",
+    )
 
     if classify_clicked:
-        # Determine the text to classify
-        input_text = user_text if user_text else ""
-        if domain == "Job Postings" and not input_text and job_summary:
-            input_text = job_summary
+        input_text = user_text or ""
 
-        if not input_text or not input_text.strip():
+        if not input_text.strip():
             st.warning("Please enter some text to classify.")
         else:
-            with st.status("Classifying text...", expanded=True) as status:
-                st.write("Preprocessing text...")
-                st.write(f"Running **{model_choice}** model...")
-                is_ai, confidence = predict_text(input_text, domain, model_choice)
-                status.update(label="Classification complete", state="complete")
+            with st.spinner(f"Running {model_choice}..."):
+                is_ai, confidence = predict_text(input_text, model_choice)
 
-            if is_ai is None:
+            if confidence == "bert_error":
                 st.error(
-                    f"Model files not found. Run the notebook and execute the "
-                    f"model-saving cell to generate files in `models/`."
+                    "TinyBERT requires `tensorflow-text` which is not installed. "
+                    "Use a different model, or run `pip install tensorflow-text`."
+                )
+            elif is_ai is None:
+                st.error(
+                    "Model files not found. Run the notebook and execute the "
+                    "model-saving cell to generate files in `models/`."
                 )
             else:
                 label = "AI-Generated" if is_ai else "Human-Written"
-                st.toast(f"Result: {label} ({confidence:.0%})", icon=":material/check_circle:")
 
-                if is_ai:
-                    st.error(f"**{label}** — {confidence:.0%} confidence ({model_choice})")
-                else:
-                    st.success(f"**{label}** — {confidence:.0%} confidence ({model_choice})")
-
-                st.badge(
-                    label,
-                    icon=":material/smart_toy:" if is_ai else ":material/person:",
-                    color="red" if is_ai else "green",
-                )
+                with st.container(border=True):
+                    r1, r2 = st.columns([2, 1])
+                    with r1:
+                        if is_ai:
+                            st.error(f"### {label}")
+                        else:
+                            st.success(f"### {label}")
+                        st.caption(f"Classified by **{model_choice}**")
+                    with r2:
+                        st.metric("Confidence", f"{confidence:.1%}")
+                    st.progress(float(confidence))
 
                 st.session_state["history"].append(
                     {
@@ -387,35 +398,29 @@ def page_detector():
                 )
                 st.session_state["detector_text"] = ""
 
-                st.divider()
-                st.caption("Was this classification accurate?")
-                st.feedback("thumbs", key="detector_feedback")
-
 
 def page_performance():
     with st.sidebar:
-        st.subheader("Filters")
-        perf_dataset = st.selectbox(
-            "Dataset", ["Job Postings", "Agricultural Listings", "Combined"]
-        )
-        st.divider()
-        st.subheader("Models")
+        _sidebar_brand()
+        st.markdown("**Filter Models**")
         selected_models = []
         for m in ALL_MODELS:
             if st.checkbox(m, value=True, key=f"perf_{m}"):
                 selected_models.append(m)
 
-    if perf_dataset == "Job Postings":
-        base_df = RESULTS_JOBS
-    elif perf_dataset == "Agricultural Listings":
-        base_df = RESULTS_AG
-    else:
-        base_df = RESULTS_DF
+        st.divider()
+        st.markdown("**Test Set**")
+        st.caption("500 human · 500 AI samples")
+        st.caption("Held out from training data")
 
-    filtered_df = base_df[base_df["Model"].isin(selected_models)]
+    filtered_df = RESULTS_DF[RESULTS_DF["Model"].isin(selected_models)]
 
-    st.header("Model Performance")
-    st.caption(f"Evaluation on **{perf_dataset}** dataset.")
+    st.title("Model Performance")
+    st.caption(
+        "Evaluation on the combined dataset (jobs + agricultural + social media)."
+    )
+
+    st.divider()
 
     if not selected_models:
         st.warning("Select at least one model in the sidebar.")
@@ -424,56 +429,82 @@ def page_performance():
     best_idx = filtered_df["Accuracy"].idxmax()
     best = filtered_df.loc[best_idx]
 
-    b1, b2, b3 = st.columns(3)
-    b1.metric("Best Model", best["Model"])
+    b1, b2, b3, b4 = st.columns(4)
+    b1.metric("Top Model", best["Model"])
     b2.metric("Accuracy", f"{best['Accuracy']:.1%}")
-    b3.metric("F1 Score", f"{best['F1']:.3f}")
+    b3.metric("F1 Score", f"{best['F1']:.1%}")
+    b4.metric("Precision", f"{best['Precision']:.1%}")
 
     st.divider()
-
     st.subheader("All Models")
     metric_cols = ["Accuracy", "Precision", "Recall", "F1"]
     st.dataframe(
         filtered_df.style.format({c: "{:.1%}" for c in metric_cols}).highlight_max(
-            subset=metric_cols, color="#ff4b4b40"
+            subset=metric_cols, color="#ef4444b3"
         ),
         use_container_width=True,
         hide_index=True,
     )
 
     st.divider()
-
     st.subheader("Visual Comparison")
     tab_bar, tab_cm = st.tabs(["Metrics", "Confusion Matrices"])
 
     with tab_bar:
-        chart_df = filtered_df.set_index("Model")[
-            ["Accuracy", "Precision", "Recall", "F1"]
-        ]
-        st.bar_chart(
-            chart_df, height=380, color=["#ff4b4b", "#ff6b6b", "#ff8a8a", "#ffaaaa"]
+        chart_df = filtered_df.melt(
+            id_vars="Model",
+            value_vars=["Accuracy", "Precision", "Recall", "F1"],
+            var_name="Metric",
+            value_name="Score",
         )
+        fig = px.bar(
+            chart_df,
+            x="Model",
+            y="Score",
+            color="Metric",
+            barmode="group",
+            color_discrete_map={
+                "Accuracy": "#ef4444",
+                "Precision": "#8b5cf6",
+                "Recall": "#10b981",
+                "F1": "#f59e0b",
+            },
+            range_y=[0.85, 1.0],
+        )
+        fig.update_layout(
+            height=480,
+            margin=dict(l=40, r=20, t=20, b=80),
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            font=dict(color="#ededed"),
+            xaxis=dict(tickangle=0, title=None),
+            yaxis=dict(
+                gridcolor="#262626",
+                zeroline=False,
+                tickformat=".0%",
+                title="Score",
+            ),
+            legend=dict(
+                orientation="h",
+                yanchor="bottom",
+                y=-0.25,
+                xanchor="center",
+                x=0.5,
+                title=None,
+            ),
+        )
+        st.plotly_chart(fig, use_container_width=True)
 
     with tab_cm:
-        # Confusion matrices from trained models
-        cms_jobs = {
-            "CatBoost": np.array([[378, 0], [0, 380]]),
-            "Random Forest": np.array([[378, 0], [0, 380]]),
-            "Logistic Regression": np.array([[377, 1], [0, 380]]),
-            "SVM": np.array([[378, 0], [0, 380]]),
-            "BERT": np.array([[374, 4], [0, 380]]),
+        # Confusion matrices on the combined test set (500 Human / 500 AI)
+        all_cms = {
+            "CatBoost": np.array([[492, 8], [49, 451]]),
+            "Logistic Regression": np.array([[488, 12], [40, 460]]),
+            "Random Forest": np.array([[493, 7], [43, 457]]),
+            "SVM": np.array([[487, 13], [39, 461]]),
+            "XGBoost": np.array([[489, 11], [49, 451]]),
+            "TinyBERT": np.array([[492, 8], [31, 469]]),
         }
-        cms_ag = {
-            "SVM": np.array([[77, 1], [0, 80]]),
-            "LSTM": np.array([[38, 1], [8, 32]]),
-            "BERT": np.array([[39, 0], [0, 40]]),
-        }
-        if perf_dataset == "Job Postings":
-            all_cms = cms_jobs
-        elif perf_dataset == "Agricultural Listings":
-            all_cms = cms_ag
-        else:
-            all_cms = {**cms_jobs, **cms_ag}
         labels = ["Human", "AI"]
         cms_to_show = {k: v for k, v in all_cms.items() if k in selected_models}
 
@@ -485,344 +516,268 @@ def page_performance():
                     x=labels,
                     y=labels,
                     text_auto=True,
-                    color_continuous_scale=[[0, "#262730"], [1, "#ff4b4b"]],
+                    color_continuous_scale=[
+                        [0.0, "#171717"],
+                        [0.3, "#171717"],
+                        [0.6, "#fb923c"],
+                        [1.0, "#ef4444"],
+                    ],
                     aspect="equal",
                 )
+                fig.update_traces(
+                    textfont=dict(size=18, color="white", family="Arial Black"),
+                )
                 fig.update_layout(
-                    title=dict(text=name, font=dict(size=14)),
+                    title=dict(
+                        text=f"<b>{name}</b>",
+                        font=dict(size=15, color="#ededed"),
+                        x=0.5,
+                        xanchor="center",
+                    ),
                     xaxis_title="Predicted",
                     yaxis_title="Actual",
-                    margin=dict(l=40, r=20, t=40, b=40),
-                    height=280,
+                    margin=dict(l=50, r=20, t=50, b=50),
+                    height=320,
                     coloraxis_showscale=False,
                     paper_bgcolor="rgba(0,0,0,0)",
                     plot_bgcolor="rgba(0,0,0,0)",
-                    font=dict(color="#fafafa"),
+                    font=dict(color="#ededed", size=13),
+                    xaxis=dict(side="bottom"),
                 )
                 st.plotly_chart(fig, use_container_width=True)
 
 
+DATASET_CONFIG = {
+    "Job Postings": {
+        "loader": load_jobs_data,
+        "label_col": "target",
+        "source_col": "source_model",
+        "text_col": "full_text",
+        "label_map": {0: "Human", 1: "AI"},
+        "description": "~3,000 data science job postings from Indeed plus AI-generated postings from 5 LLMs.",
+        "schema": [
+            ("target", "int", "0 = Human, 1 = AI"),
+            ("source_model", "str", "Origin of the entry"),
+            ("full_text", "str", "Title + description"),
+        ],
+    },
+    "Agricultural Listings": {
+        "loader": load_ag_data,
+        "label_col": "label",
+        "source_col": "source_model",
+        "text_col": "description",
+        "label_map": {"Human": "Human", "AI": "AI"},
+        "description": "790 farm listings from the Care Farming Network plus AI-generated listings from 4 NVIDIA NIM models.",
+        "schema": [
+            ("id", "str", "URL-friendly slug"),
+            ("name", "str", "Listing name"),
+            ("description", "str", "Full description"),
+            ("label", "str", "Human or AI"),
+            ("source_model", "str", "Generation model"),
+        ],
+    },
+    "Social Media": {
+        "loader": load_social_data,
+        "label_col": "target",
+        "source_col": "source_model",
+        "text_col": "Title",
+        "label_map": {0: "Human", 1: "AI"},
+        "description": "~1,200 Reddit posts from real subreddits plus AI-generated posts from ChatGPT, Claude, and Gemini.",
+        "schema": [
+            ("Title", "str", "Reddit post title"),
+            ("URL", "str", "Source URL"),
+            ("Score", "int", "Upvotes minus downvotes"),
+            ("Upvote_Ratio", "float", "Ratio of upvotes"),
+            ("Num_Comments", "int", "Number of comments"),
+            ("Post_Date", "str", "Posting date"),
+            ("target", "int", "0 = Human, 1 = AI"),
+            ("source_model", "str", "Generation model"),
+        ],
+    },
+}
+
 
 def page_data():
     with st.sidebar:
-        st.subheader("Filters")
-        ds = st.selectbox("Dataset", ["Job Postings", "Agricultural Listings"])
-        st.divider()
-
-        if ds == "Job Postings":
-            label_f = st.multiselect("Label", ["Human", "AI"], default=["Human", "AI"])
-            source_f = st.multiselect(
-                "Source",
-                [
-                    "human",
-                    "chatgpt ai",
-                    "claude ai",
-                    "copilot ai",
-                    "gemini ai",
-                    "perplexity ai",
-                ],
-                default=[
-                    "human",
-                    "chatgpt ai",
-                    "claude ai",
-                    "copilot ai",
-                    "gemini ai",
-                    "perplexity ai",
-                ],
-            )
-            max_rows = st.slider("Max rows", 10, 500, 100)
-        else:
-            label_f = st.multiselect(
-                "Label", ["Human", "AI"], default=["Human", "AI"], key="ag_label"
-            )
-            model_f = st.multiselect(
-                "AI Model",
-                [
-                    "openai/gpt-oss-120b",
-                    "qwen/qwen2.5-7b-instruct",
-                    "meta/llama-3.1-70b-instruct",
-                    "mistralai/mixtral-8x22b-instruct-v0.1",
-                ],
-                default=[
-                    "openai/gpt-oss-120b",
-                    "qwen/qwen2.5-7b-instruct",
-                    "meta/llama-3.1-70b-instruct",
-                    "mistralai/mixtral-8x22b-instruct-v0.1",
-                ],
-            )
-            max_rows = st.slider("Max rows", 10, 500, 100, key="ag_rows")
-
-    st.header("Dataset Explorer")
-    st.caption("Browse, filter, and inspect training data.")
-
-    st.divider()
-
-    if ds == "Job Postings":
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Total", "~2,000")
-        c2.metric("Human", "~1,000")
-        c3.metric("AI", "~1,000")
-
-        col_table, col_chart = st.columns([3, 2], gap="large")
-
-        with col_table:
-            st.subheader("Sources")
-            src_df = pd.DataFrame(
-                {
-                    "Source": [
-                        "Human (Indeed)",
-                        "ChatGPT",
-                        "Claude",
-                        "Copilot",
-                        "Gemini",
-                        "Perplexity",
-                    ],
-                    "Count": ["~1,000", "~200", "~200", "~200", "~200", "~200"],
-                }
-            )
-            st.dataframe(src_df, use_container_width=True, hide_index=True)
-
-        with col_chart:
-            st.subheader("Distribution")
-            chart_src = pd.DataFrame(
-                {
-                    "Source": [
-                        "Human",
-                        "ChatGPT",
-                        "Claude",
-                        "Copilot",
-                        "Gemini",
-                        "Perplexity",
-                    ],
-                    "Entries": [1000, 200, 200, 200, 200, 200],
-                }
-            ).set_index("Source")
-            st.bar_chart(chart_src, height=250, color="#ff4b4b")
-
-        st.divider()
-
-        st.subheader("Sample Data")
-        st.caption(
-            f"Showing: labels={label_f}, sources={source_f}, limit={max_rows}"
+        _sidebar_brand()
+        st.markdown("**Dataset**")
+        ds = st.selectbox(
+            "Dataset", list(DATASET_CONFIG.keys()), label_visibility="collapsed"
         )
-        jobs_df = load_jobs_data()
-        label_map = {"Human": 0, "AI": 1}
-        label_vals = [label_map[lbl] for lbl in label_f]
-        filtered_jobs = jobs_df[
-            (jobs_df["is_AI"].isin(label_vals)) & (jobs_df["source"].isin(source_f))
-        ].head(max_rows)
-        st.dataframe(filtered_jobs, use_container_width=True, hide_index=True)
-
-        with st.expander("Schema"):
-            st.markdown("""
-| Field | Type | Description |
-|---|---|---|
-| `job_title` | str | Title of the posting |
-| `job_location` | str | City, State (normalized) |
-| `job_salary` | str | Annual salary range |
-| `job_summary` | str | Full description |
-| `is_AI` | int | 0 = Human, 1 = AI |
-| `source` | str | Origin of the entry |
-            """)
-
-    else:
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Total", "790")
-        c2.metric("Human", "390")
-        c3.metric("AI", "400")
-
-        col_table, col_chart = st.columns([3, 2], gap="large")
-
-        with col_table:
-            st.subheader("AI Models Used")
-            ai_df = pd.DataFrame(
-                {
-                    "Model": [
-                        "openai/gpt-oss-120b",
-                        "qwen/qwen2.5-7b-instruct",
-                        "meta/llama-3.1-70b-instruct",
-                        "mistralai/mixtral-8x22b-instruct-v0.1",
-                    ],
-                    "Entries": [100, 100, 100, 100],
-                }
-            )
-            st.dataframe(ai_df, use_container_width=True, hide_index=True)
-
-        with col_chart:
-            st.subheader("Distribution")
-            ag_chart = pd.DataFrame(
-                {
-                    "Source": ["Human", "gpt-oss-120b", "qwen2.5-7b", "llama-3.1-70b", "mixtral-8x22b"],
-                    "Entries": [390, 100, 100, 100, 100],
-                }
-            ).set_index("Source")
-            st.bar_chart(ag_chart, height=250, color="#ff4b4b")
+        st.caption(DATASET_CONFIG[ds]["description"])
 
         st.divider()
+        st.markdown("**Filter Sample**")
+        label_f = []
+        if st.checkbox("Human", value=True, key="data_label_human"):
+            label_f.append("Human")
+        if st.checkbox("AI", value=True, key="data_label_ai"):
+            label_f.append("AI")
+        max_rows = st.slider("Max rows to display", 10, 500, 50)
 
-        st.subheader("Sample Data")
-        st.caption(f"Showing: labels={label_f}, models={model_f}, limit={max_rows}")
-        ag_df = load_ag_data()
-        filtered_ag = ag_df[ag_df["label"].isin(label_f)]
-        if "AI" in label_f and model_f:
-            filtered_ag = filtered_ag[
-                (filtered_ag["label"] == "Human") | (filtered_ag["source_model"].isin(model_f))
-            ]
-        st.dataframe(filtered_ag.head(max_rows), use_container_width=True, hide_index=True)
+    cfg = DATASET_CONFIG[ds]
+    df = cfg["loader"]()
 
-        with st.expander("Schema"):
-            st.markdown("""
-| Field | Type | Description |
-|---|---|---|
-| `id` | str | URL-friendly slug |
-| `name` | str | Listing name |
-| `description` | str | Full description |
-| `label` | str | Human or AI |
-| `source_model` | str | Generation model (AI only) |
-            """)
+    # Normalize label column to Human/AI strings for consistent filtering
+    df = df.copy()
+    df["_label"] = df[cfg["label_col"]].map(cfg["label_map"])
+
+    st.title("Dataset Explorer")
+    st.caption(cfg["description"])
 
     st.divider()
 
-    st.subheader("Text Statistics")
-    ts1, ts2, ts3, ts4 = st.columns(4)
-    ts1.metric("Avg Words (Human)", "147")
-    ts2.metric("Avg Words (AI)", "183")
-    ts3.metric("Avg Sent. Len (Human)", "18.2")
-    ts4.metric("Avg Sent. Len (AI)", "22.7")
-
-
-def page_about():
-    with st.sidebar:
-        st.subheader("Links")
-        st.caption("CSE 881 — Spring 2025")
-        st.markdown("**Team size:** 4")
-
-    st.header("About")
-    st.caption("Automated Classification of Human vs AI Postings — CSE 881")
-
-    st.markdown("""
-    This project develops a system to classify and detect AI-generated text across online
-    postings. We scrape real human data from job boards and farming directories, generate
-    synthetic AI text from multiple LLMs, then train and evaluate a suite of classifiers.
-    """)
-
-    st.divider()
-
-    st.subheader("Methodology")
-    tab_collect, tab_preprocess, tab_models, tab_eval = st.tabs(
-        [
-            "Collection",
-            "Preprocessing",
-            "Models",
-            "Evaluation",
-        ]
+    # Overview metrics
+    total = len(df)
+    n_human = (df["_label"] == "Human").sum()
+    n_ai = (df["_label"] == "AI").sum()
+    avg_words = (
+        df[cfg["text_col"]].fillna("").astype(str).str.split().str.len().mean()
     )
 
-    with tab_collect:
-        st.markdown("""
-**Job postings** — ~1,000 real postings scraped from Indeed via Octoparse.
-~1,000 AI postings generated across Claude, ChatGPT, Copilot, Gemini, and Perplexity.
-
-**Agricultural listings** — 390 real listings scraped from the Care Farming Network
-using Playwright + BeautifulSoup. 400 AI listings generated via 4 NVIDIA NIM models.
-        """)
-
-    with tab_preprocess:
-        st.markdown("""
-- HTML / noise removal, markdown stripping
-- Salary normalization (hourly to annual), location formatting (City, State)
-- Stopword removal, lowercasing, n-gram extraction (NLTK)
-- Binary encoding (Human = 0, AI = 1)
-- 80 / 10 / 10 stratified train / validation / test split
-        """)
-
-    with tab_models:
-        model_df = pd.DataFrame(
-            {
-                "Model": [
-                    "Logistic Regression",
-                    "Random Forest",
-                    "SVM",
-                    "CatBoost",
-                    "LSTM",
-                    "BERT",
-                ],
-                "Category": [
-                    "Baseline",
-                    "Baseline",
-                    "Baseline",
-                    "Gradient Boosting",
-                    "Deep Learning",
-                    "Deep Learning",
-                ],
-                "Description": [
-                    "Linear classifier on TF-IDF features",
-                    "Ensemble of decision trees on TF-IDF features",
-                    "SVM with linear kernel on TF-IDF features",
-                    "Handles categorical text features natively",
-                    "LSTM network on tokenized text sequences",
-                    "Fine-tuned BERT (bert_tiny_en_uncased)",
-                ],
-            }
-        )
-        st.dataframe(model_df, use_container_width=True, hide_index=True)
-
-    with tab_eval:
-        st.markdown("""
-- Accuracy, precision, recall, F1, and AUC-ROC
-- Cross-dataset evaluation (train on one domain, test on the other)
-- Baseline vs. custom algorithm comparison
-        """)
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Total Samples", f"{total:,}")
+    c2.metric("Human", f"{n_human:,}")
+    c3.metric("AI", f"{n_ai:,}")
+    c4.metric("Avg Words", f"{avg_words:.0f}")
 
     st.divider()
 
-    st.subheader("Team")
-    t1, t2, t3, t4 = st.columns(4)
-    with t1:
-        st.markdown("**Hussain Aljafer**")
-        st.caption(
-            "Data collection, preprocessing, baseline models, AI detection algorithm"
+    # Side-by-side charts: sources + class balance
+    col_sources, col_balance = st.columns([2, 1], gap="large")
+
+    with col_sources:
+        st.subheader("Distribution by Source")
+        src_counts = df[cfg["source_col"]].value_counts().reset_index()
+        src_counts.columns = ["Source", "Entries"]
+        fig_src = px.bar(
+            src_counts,
+            x="Source",
+            y="Entries",
+            color="Source",
+            color_discrete_map=SOURCE_COLORS,
+            text="Entries",
         )
-    with t2:
-        st.markdown("**Wahid Hashem**")
-        st.caption(
-            "AI data generation, preprocessing, Streamlit app design & development"
+        fig_src.update_traces(textposition="outside", cliponaxis=False)
+        fig_src.update_layout(
+            height=380,
+            margin=dict(l=20, r=20, t=40, b=40),
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            font=dict(color="#ededed"),
+            xaxis=dict(title=None, tickangle=-20),
+            yaxis=dict(gridcolor="#262626", zeroline=False),
+            showlegend=False,
         )
-    with t3:
-        st.markdown("**Aryan Sharma**")
-        st.caption("AI data generation, baseline model research, evaluation, report")
-    with t4:
-        st.markdown("**Ricky Li**")
-        st.caption("Agricultural scraping & generation, neural networks, evaluation")
+        st.plotly_chart(fig_src, use_container_width=True)
+
+    with col_balance:
+        st.subheader("Class Balance")
+        balance_df = pd.DataFrame(
+            {"Label": ["Human", "AI"], "Count": [n_human, n_ai]}
+        )
+        fig_bal = px.pie(
+            balance_df,
+            values="Count",
+            names="Label",
+            color="Label",
+            color_discrete_map={"Human": "#10b981", "AI": "#ef4444"},
+            hole=0.55,
+        )
+        fig_bal.update_traces(
+            textinfo="label+percent",
+            textfont=dict(size=13, color="white"),
+        )
+        fig_bal.update_layout(
+            height=380,
+            margin=dict(l=20, r=20, t=40, b=20),
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            font=dict(color="#ededed"),
+            showlegend=False,
+        )
+        st.plotly_chart(fig_bal, use_container_width=True)
 
     st.divider()
 
-    st.subheader("Tech Stack")
-    st.markdown("""
-| Layer | Tools |
-|---|---|
-| Data & ML | Python, pandas, NumPy, scikit-learn, CatBoost, NLTK |
-| Deep Learning | PyTorch / TensorFlow, text embeddings |
-| Frontend | Streamlit, Plotly, Matplotlib |
-| Scraping | Octoparse, Playwright, BeautifulSoup |
-    """)
+    # Text length distribution (Human vs AI)
+    st.subheader("Text Length Distribution (Human vs AI)")
+    word_counts = (
+        df[cfg["text_col"]].fillna("").astype(str).str.split().str.len()
+    )
+    length_df = pd.DataFrame({"Words": word_counts, "Label": df["_label"]})
+    fig_len = px.histogram(
+        length_df,
+        x="Words",
+        color="Label",
+        color_discrete_map={"Human": "#10b981", "AI": "#ef4444"},
+        barmode="overlay",
+        opacity=0.65,
+        nbins=40,
+    )
+    fig_len.update_layout(
+        height=300,
+        margin=dict(l=20, r=20, t=20, b=40),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(color="#ededed"),
+        xaxis=dict(title="Word Count", gridcolor="#262626", zeroline=False),
+        yaxis=dict(title="Frequency", gridcolor="#262626", zeroline=False),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0.5, xanchor="center"),
+    )
+    st.plotly_chart(fig_len, use_container_width=True)
+
+    st.divider()
+
+    # Filtered sample table
+    st.subheader("Sample Data")
+    filtered = df[df["_label"].isin(label_f)].drop(columns=["_label"]).head(max_rows)
+    st.caption(f"Showing {len(filtered):,} of {total:,} rows")
+    st.dataframe(filtered, use_container_width=True, hide_index=True)
+
+    with st.expander("Schema"):
+        schema_df = pd.DataFrame(
+            cfg["schema"], columns=["Field", "Type", "Description"]
+        )
+        st.dataframe(schema_df, use_container_width=True, hide_index=True)
+
 
 
 # Configure Streamlit App
 
 st.set_page_config(
     page_title="AI Text Detector",
+    page_icon="🔍",
     layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+
+PAGE_HOME = st.Page(
+    page_home,
+    title="Home",
+    icon=":material/home:",
+    url_path="home",
+    default=True,
+)
+PAGE_DETECTOR = st.Page(
+    page_detector,
+    title="Detector",
+    icon=":material/document_scanner:",
+    url_path="detector",
+)
+PAGE_PERFORMANCE = st.Page(
+    page_performance,
+    title="Performance",
+    icon=":material/leaderboard:",
+    url_path="performance",
+)
+PAGE_DATA = st.Page(
+    page_data, title="Data", icon=":material/database:", url_path="data"
 )
 
 nav = st.navigation(
-    [
-        st.Page(page_home, title="Home", icon=":material/home:", url_path="home", default=True),
-        st.Page(page_detector, title="Detector", icon=":material/search:", url_path="detector"),
-        st.Page(page_performance, title="Performance", icon=":material/analytics:", url_path="performance"),
-        st.Page(page_data, title="Data", icon=":material/database:", url_path="data"),
-        st.Page(page_about, title="About", icon=":material/info:", url_path="about"),
-    ],
+    [PAGE_HOME, PAGE_DETECTOR, PAGE_PERFORMANCE, PAGE_DATA],
     position="top",
 )
 

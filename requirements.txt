@@ -1,0 +1,12 @@
+streamlit
+pandas
+numpy
+plotly
+catboost
+scikit-learn
+joblib
+nltk
+xgboost
+tensorflow
+tensorflow-text
+keras-nlp
