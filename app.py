@@ -122,7 +122,8 @@ def load_custom_algorithm_data():
         tuple(k.split()): v for k, v in zip(bigrams_df["bigram"], bigrams_df["ratio"])
     }
     ai_trigrams = {
-        tuple(k.split()): v for k, v in zip(trigrams_df["trigram"], trigrams_df["ratio"])
+        tuple(k.split()): v
+        for k, v in zip(trigrams_df["trigram"], trigrams_df["ratio"])
     }
     return ai_words, ai_bigrams, ai_trigrams
 
@@ -135,9 +136,7 @@ def _custom_detect(text, ai_words, ai_bigrams, ai_trigrams, threshold=0.2):
 
     for pkg in ("punkt", "punkt_tab", "stopwords"):
         try:
-            nltk.data.find(
-                f"tokenizers/{pkg}" if "punkt" in pkg else f"corpora/{pkg}"
-            )
+            nltk.data.find(f"tokenizers/{pkg}" if "punkt" in pkg else f"corpora/{pkg}")
         except LookupError:
             try:
                 nltk.download(pkg, quiet=True)
