@@ -110,7 +110,7 @@ def deep_clean_text(text):
 @st.cache_resource
 def load_custom_algorithm_data():
     """Load the pre-trained AI word/bigram/trigram ratio dictionaries."""
-    base = os.path.join(BASE_DIR, "custom algorithm")
+    base = os.path.join(BASE_DIR, "custom_algorithm")
     try:
         words_df = pd.read_csv(os.path.join(base, "ai_words.csv"))
         bigrams_df = pd.read_csv(os.path.join(base, "ai_bigrams.csv"))
