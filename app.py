@@ -115,27 +115,15 @@ def load_custom_algorithm_data():
         words_df = pd.read_csv(os.path.join(base, "ai_words.csv"))
         bigrams_df = pd.read_csv(os.path.join(base, "ai_bigrams.csv"))
         trigrams_df = pd.read_csv(os.path.join(base, "ai_trigrams.csv"))
-    except Exception as e:
-        print(f"[custom_algorithm] failed to load CSVs from {base}: {type(e).__name__}: {e}")
-        try:
-            print(f"[custom_algorithm] directory listing: {os.listdir(base)}")
-        except Exception as e2:
-            print(f"[custom_algorithm] cannot list dir: {e2}")
+    except FileNotFoundError:
         return None, None, None
-    ai_words = {
-        str(k): v
-        for k, v in zip(words_df["word"], words_df["ratio"])
-        if isinstance(k, str)
-    }
+    ai_words = dict(zip(words_df["word"], words_df["ratio"]))
     ai_bigrams = {
-        tuple(str(k).split()): v
-        for k, v in zip(bigrams_df["bigram"], bigrams_df["ratio"])
-        if isinstance(k, str)
+        tuple(k.split()): v for k, v in zip(bigrams_df["bigram"], bigrams_df["ratio"])
     }
     ai_trigrams = {
-        tuple(str(k).split()): v
+        tuple(k.split()): v
         for k, v in zip(trigrams_df["trigram"], trigrams_df["ratio"])
-        if isinstance(k, str)
     }
     return ai_words, ai_bigrams, ai_trigrams
 
