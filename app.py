@@ -23,6 +23,7 @@ ALL_MODELS = [
     "SVM",
     "XGBoost",
     "TinyBERT",
+    "Custom Algorithm",
 ]
 
 # Trained on the combined dataset (jobs + agricultural + social media)
@@ -35,11 +36,12 @@ RESULTS_DF = pd.DataFrame(
             "SVM",
             "XGBoost",
             "TinyBERT",
+            "Custom Algorithm",
         ],
-        "Accuracy": [0.9430, 0.9480, 0.9500, 0.9480, 0.9400, 0.9610],
-        "Precision": [0.95, 0.95, 0.95, 0.95, 0.94, 0.96],
-        "Recall": [0.94, 0.95, 0.95, 0.95, 0.94, 0.96],
-        "F1": [0.94, 0.95, 0.95, 0.95, 0.94, 0.96],
+        "Accuracy": [0.9430, 0.9480, 0.9500, 0.9480, 0.9400, 0.9610, 0.6640],
+        "Precision": [0.95, 0.95, 0.95, 0.95, 0.94, 0.96, 0.74],
+        "Recall": [0.94, 0.95, 0.95, 0.95, 0.94, 0.96, 0.51],
+        "F1": [0.94, 0.95, 0.95, 0.95, 0.94, 0.96, 0.60],
     }
 )
 
@@ -106,6 +108,82 @@ def deep_clean_text(text):
 
 
 @st.cache_resource
+def load_custom_algorithm_data():
+    """Load the pre-trained AI word/bigram/trigram ratio dictionaries."""
+    base = os.path.join(BASE_DIR, "custom algorithm")
+    try:
+        words_df = pd.read_csv(os.path.join(base, "ai_words.csv"))
+        bigrams_df = pd.read_csv(os.path.join(base, "ai_bigrams.csv"))
+        trigrams_df = pd.read_csv(os.path.join(base, "ai_trigrams.csv"))
+    except FileNotFoundError:
+        return None, None, None
+    ai_words = dict(zip(words_df["word"], words_df["ratio"]))
+    ai_bigrams = {
+        tuple(k.split()): v for k, v in zip(bigrams_df["bigram"], bigrams_df["ratio"])
+    }
+    ai_trigrams = {
+        tuple(k.split()): v for k, v in zip(trigrams_df["trigram"], trigrams_df["ratio"])
+    }
+    return ai_words, ai_bigrams, ai_trigrams
+
+
+def _custom_detect(text, ai_words, ai_bigrams, ai_trigrams, threshold=0.2):
+    """Custom AI detection: weighted word/bigram/trigram ratio scoring."""
+    import nltk
+    import string
+    from nltk.corpus import stopwords
+
+    for pkg in ("punkt", "punkt_tab", "stopwords"):
+        try:
+            nltk.data.find(
+                f"tokenizers/{pkg}" if "punkt" in pkg else f"corpora/{pkg}"
+            )
+        except LookupError:
+            try:
+                nltk.download(pkg, quiet=True)
+            except Exception:
+                pass
+
+    stop = set(stopwords.words("english"))
+
+    # Word score: remove stopwords + punctuation, look up each word in ai_words
+    lowered = text.lower()
+    tokens = nltk.word_tokenize(lowered)
+    cleaned_words = [
+        w.translate(str.maketrans("", "", string.punctuation))
+        for w in tokens
+        if w not in stop
+    ]
+    cleaned_words = [w for w in cleaned_words if w]
+    word_score = (
+        sum(ai_words.get(w, 0) for w in cleaned_words) / len(cleaned_words)
+        if cleaned_words
+        else 0.0
+    )
+
+    # N-gram scores: alphanumeric tokens, then n-grams
+    alnum_tokens = [w for w in tokens if w.isalnum()]
+    bigrams = list(nltk.ngrams(alnum_tokens, 2))
+    trigrams = list(nltk.ngrams(alnum_tokens, 3))
+    bigram_score = (
+        sum(ai_bigrams.get(bg, 0) for bg in bigrams) / len(bigrams) if bigrams else 0.0
+    )
+    trigram_score = (
+        sum(ai_trigrams.get(tg, 0) for tg in trigrams) / len(trigrams)
+        if trigrams
+        else 0.0
+    )
+
+    score = word_score * 0.5 + bigram_score * 0.3 + trigram_score * 0.2
+    is_ai = score > threshold
+    # Map raw score to a [0.5, 1.0] confidence via logistic centered on threshold
+    z = (score - threshold) * 10
+    prob_ai = 1.0 / (1.0 + np.exp(-z))
+    confidence = float(prob_ai if is_ai else 1.0 - prob_ai)
+    return bool(is_ai), confidence
+
+
+@st.cache_resource
 def load_model(model_name):
     """Load a trained model and its vectorizer from disk (combined dataset)."""
     sklearn_models = {
@@ -163,6 +241,12 @@ def load_model(model_name):
 
 def predict_text(text, model_name):
     """Run inference on user text and return (is_ai, confidence)."""
+    if model_name == "Custom Algorithm":
+        ai_words, ai_bigrams, ai_trigrams = load_custom_algorithm_data()
+        if ai_words is None:
+            return None, None
+        return _custom_detect(text, ai_words, ai_bigrams, ai_trigrams)
+
     model, tfidf, model_type = load_model(model_name)
     if isinstance(model_type, str) and model_type.startswith("bert_error"):
         return None, model_type
@@ -321,6 +405,7 @@ MODEL_DESCRIPTIONS = {
     "SVM": "Support vector machine with linear kernel on TF-IDF.",
     "XGBoost": "Gradient boosting on TF-IDF. Strong general-purpose baseline.",
     "TinyBERT": "Fine-tuned transformer (bert_tiny_en_uncased). Highest accuracy at 96.1%.",
+    "Custom Algorithm": "Heuristic scoring from AI-leaning word/bigram/trigram ratios (50/30/20 weighted).",
 }
 
 
@@ -473,6 +558,8 @@ def page_performance():
             var_name="Metric",
             value_name="Score",
         )
+        y_min = max(0.0, chart_df["Score"].min() - 0.05)
+        y_low = 0.85 if y_min >= 0.80 else y_min
         fig = px.bar(
             chart_df,
             x="Model",
@@ -485,7 +572,7 @@ def page_performance():
                 "Recall": "#10b981",
                 "F1": "#f59e0b",
             },
-            range_y=[0.85, 1.0],
+            range_y=[y_low, 1.0],
         )
         fig.update_layout(
             height=480,
@@ -520,6 +607,7 @@ def page_performance():
             "SVM": np.array([[487, 13], [39, 461]]),
             "XGBoost": np.array([[489, 11], [49, 451]]),
             "TinyBERT": np.array([[492, 8], [31, 469]]),
+            "Custom Algorithm": np.array([[411, 89], [247, 253]]),
         }
         labels = ["Human", "AI"]
         cms_to_show = {k: v for k, v in all_cms.items() if k in selected_models}
