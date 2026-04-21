@@ -23,7 +23,7 @@ ALL_MODELS = [
     "SVM",
     "XGBoost",
     "TinyBERT",
-    "Custom Algorithm",
+    "AI Detective",
 ]
 
 # Trained on the combined dataset (jobs + agricultural + social media)
@@ -36,12 +36,12 @@ RESULTS_DF = pd.DataFrame(
             "SVM",
             "XGBoost",
             "TinyBERT",
-            "Custom Algorithm",
+            "AI Detective",
         ],
-        "Accuracy": [0.9430, 0.9480, 0.9500, 0.9480, 0.9400, 0.9610, 0.6640],
-        "Precision": [0.95, 0.95, 0.95, 0.95, 0.94, 0.96, 0.74],
-        "Recall": [0.94, 0.95, 0.95, 0.95, 0.94, 0.96, 0.51],
-        "F1": [0.94, 0.95, 0.95, 0.95, 0.94, 0.96, 0.60],
+        "Accuracy": [0.9430, 0.9480, 0.9500, 0.9480, 0.9400, 0.9610, 0.8763],
+        "Precision": [0.95, 0.95, 0.95, 0.95, 0.94, 0.96, 0.94],
+        "Recall": [0.94, 0.95, 0.95, 0.95, 0.94, 0.96, 0.80],
+        "F1": [0.94, 0.95, 0.95, 0.95, 0.94, 0.96, 0.87],
     }
 )
 
@@ -240,7 +240,7 @@ def load_model(model_name):
 
 def predict_text(text, model_name):
     """Run inference on user text and return (is_ai, confidence)."""
-    if model_name == "Custom Algorithm":
+    if model_name == "AI Detective":
         ai_words, ai_bigrams, ai_trigrams = load_custom_algorithm_data()
         if ai_words is None:
             return None, None
@@ -404,7 +404,7 @@ MODEL_DESCRIPTIONS = {
     "SVM": "Support vector machine with linear kernel on TF-IDF.",
     "XGBoost": "Gradient boosting on TF-IDF. Strong general-purpose baseline.",
     "TinyBERT": "Fine-tuned transformer (bert_tiny_en_uncased). Highest accuracy at 96.1%.",
-    "Custom Algorithm": "Heuristic scoring from AI-leaning word/bigram/trigram ratios (50/30/20 weighted).",
+    "AI Detective": "Heuristic scoring from AI-leaning word/bigram/trigram ratios (50/30/20 weighted). Trained and evaluated on jobs only.",
 }
 
 
@@ -537,6 +537,10 @@ def page_performance():
 
     st.divider()
     st.subheader("All Models")
+    st.caption(
+        "ML models are evaluated on the 1,000-sample combined test set. "
+        "AI Detective is evaluated on its training domain (jobs, 3,000 samples)."
+    )
     metric_cols = ["Accuracy", "Precision", "Recall", "F1"]
     st.dataframe(
         filtered_df.style.format({c: "{:.1%}" for c in metric_cols}).highlight_max(
@@ -606,7 +610,7 @@ def page_performance():
             "SVM": np.array([[487, 13], [39, 461]]),
             "XGBoost": np.array([[489, 11], [49, 451]]),
             "TinyBERT": np.array([[492, 8], [31, 469]]),
-            "Custom Algorithm": np.array([[411, 89], [247, 253]]),
+            "AI Detective": np.array([[1429, 71], [300, 1200]]),
         }
         labels = ["Human", "AI"]
         cms_to_show = {k: v for k, v in all_cms.items() if k in selected_models}
